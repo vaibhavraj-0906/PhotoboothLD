@@ -56,9 +56,21 @@
 
   <!-- CONNECTED / READY -->
   <section id="screen-connected-ready" class="screen">
-    <div class="card">
-      <p>💞 Partner connected!</p>
-      <button id="btn-start-session" class="btn btn-primary">Start the Photobooth</button>
+    <div class="card wide">
+      <p>💞 Partner connected! Pick your scene.</p>
+
+      <div class="picker">
+        <label class="picker-label">Backdrop</label>
+        <div id="backdrop-picker" class="swatch-row"></div>
+      </div>
+
+      <div class="picker">
+        <label class="picker-label">Filter</label>
+        <div id="filter-picker" class="chip-row"></div>
+      </div>
+
+      <p id="setup-status" class="status-text">Warming up the camera…</p>
+      <button id="btn-start-session" class="btn btn-primary" disabled>Start the Photobooth</button>
     </div>
   </section>
 
@@ -72,12 +84,7 @@
 
       <div class="camera-stage">
         <video id="live-video" autoplay playsinline muted></video>
-        <img id="ghost-overlay" class="ghost" hidden />
-      </div>
-
-      <div id="overlay-controls" class="overlay-controls" hidden>
-        <label for="opacity-slider">Ghost opacity</label>
-        <input id="opacity-slider" type="range" min="0.1" max="0.9" step="0.05" value="0.5" />
+        <canvas id="stage-canvas"></canvas>
       </div>
 
       <p id="round-status-text" class="status-text"></p>
@@ -100,6 +107,10 @@
     <div class="card">
       <h2>Your strip is ready! 🎉</h2>
       <canvas id="strip-canvas"></canvas>
+      <div class="picker">
+        <label class="picker-label">Filter</label>
+        <div id="review-filter-picker" class="chip-row"></div>
+      </div>
       <div class="button-row">
         <button id="btn-download" class="btn btn-primary">Download Strip</button>
         <button id="btn-start-over" class="btn btn-secondary">Start Over</button>
@@ -119,8 +130,12 @@
 </main>
 
 <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/selfie_segmentation/selfie_segmentation.js" crossorigin="anonymous"></script>
 <script src="js/sky.js" defer></script>
 <script src="js/protocol.js" defer></script>
+<script src="js/looks.js" defer></script>
+<script src="js/segment.js" defer></script>
+<script src="js/compositor.js" defer></script>
 <script src="js/camera.js" defer></script>
 <script src="js/session.js" defer></script>
 <script src="js/peer.js" defer></script>

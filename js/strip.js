@@ -33,7 +33,7 @@ window.Strip = (function () {
     ctx.drawImage(img, sx, sy, sw, sh, x, y, w, h);
   }
 
-  async function buildStrip(dataUrls) {
+  async function buildStrip(dataUrls, filterId) {
     const images = await Promise.all(dataUrls.map(loadImage));
     const stripW = PHOTO_W + PADDING * 2;
     const stripH = PADDING + images.length * (PHOTO_H + PADDING) + FOOTER_H;
@@ -52,7 +52,17 @@ window.Strip = (function () {
     images.forEach((img, i) => {
       const x = PADDING;
       const y = PADDING + i * (PHOTO_H + PADDING);
-      drawCover(ctx, img, x, y, PHOTO_W, PHOTO_H);
+
+      // Grade each photo in its own buffer so the look applies to the picture,
+      // not to the strip's background and borders.
+      const cell = document.createElement('canvas');
+      cell.width = PHOTO_W;
+      cell.height = PHOTO_H;
+      const cellCtx = cell.getContext('2d');
+      drawCover(cellCtx, img, 0, 0, PHOTO_W, PHOTO_H);
+      if (filterId && window.Looks) Looks.applyFilter(cellCtx, PHOTO_W, PHOTO_H, filterId);
+      ctx.drawImage(cell, x, y);
+
       const border = ctx.createLinearGradient(x, y, x + PHOTO_W, y + PHOTO_H);
       border.addColorStop(0, '#2fd9a8');
       border.addColorStop(1, '#8b6fe8');

@@ -1,4 +1,4 @@
-// Screen controller / state machine — wires camera, peer, session, and strip modules together.
+// Screen controller / state machine — wires camera, segmentation, peer, and strip together.
 (function () {
   const el = (id) => document.getElementById(id);
 
@@ -19,20 +19,38 @@
   }
 
   function showError(title, detail) {
+    stopPreviewLoop();
     el('error-title').textContent = title;
     el('error-detail').textContent = detail || '';
     showScreen('error');
   }
 
-  // ---- Camera pre-flight ----
+  // ---- Shared scene settings (kept in sync across both peers) ----
+  let backdropId = Looks.BACKDROPS[0].id;
+  let filterId = 'none';
+  let backdropImg = null;
+
+  // ---- Camera + segmentation ----
   const liveVideo = el('live-video');
   const previewVideoCreate = el('preview-video-create');
+  const stageCanvas = el('stage-canvas');
+  const stageCtx = stageCanvas.getContext('2d');
+  stageCanvas.width = Compositor.FRAME_W;
+  stageCanvas.height = Compositor.FRAME_H;
+
   let cameraStream = null;
+  let segmentReady = false;
 
   async function ensureCamera() {
     if (cameraStream) return cameraStream;
     cameraStream = await Camera.init(liveVideo);
     return cameraStream;
+  }
+
+  async function ensureSegmenter() {
+    if (segmentReady) return;
+    await Segmenter.init();
+    segmentReady = true;
   }
 
   // ---- Landing ----
@@ -69,7 +87,6 @@
     showScreen('waiting-join');
   });
 
-  // Prefill room code from a shared link.
   const urlCode = new URLSearchParams(location.search).get('room');
   if (urlCode) el('input-code').value = urlCode.toUpperCase();
 
@@ -85,15 +102,90 @@
     });
   });
 
+  // ---- Scene pickers ----
+  function buildPickers() {
+    const bd = el('backdrop-picker');
+    bd.innerHTML = '';
+    Looks.BACKDROPS.forEach((b) => {
+      const btn = document.createElement('button');
+      btn.className = 'swatch' + (b.id === backdropId ? ' selected' : '');
+      btn.style.backgroundImage = 'url("' + b.src + '")';
+      btn.title = b.name;
+      btn.setAttribute('aria-label', b.name);
+      btn.addEventListener('click', () => {
+        backdropId = b.id;
+        broadcastSettings();
+        refreshPickers();
+        loadBackdropImage();
+      });
+      bd.appendChild(btn);
+    });
+
+    ['filter-picker', 'review-filter-picker'].forEach((containerId) => {
+      const fp = el(containerId);
+      fp.innerHTML = '';
+      Looks.FILTERS.forEach((f) => {
+        const chip = document.createElement('button');
+        chip.className = 'chip' + (f.id === filterId ? ' selected' : '');
+        chip.textContent = f.name;
+        chip.addEventListener('click', () => {
+          filterId = f.id;
+          broadcastSettings();
+          refreshPickers();
+          if (screens['strip-review'].classList.contains('active')) finishStrip();
+        });
+        fp.appendChild(chip);
+      });
+    });
+  }
+
+  function refreshPickers() {
+    Array.from(el('backdrop-picker').children).forEach((c, i) => {
+      c.classList.toggle('selected', Looks.BACKDROPS[i].id === backdropId);
+    });
+    ['filter-picker', 'review-filter-picker'].forEach((containerId) => {
+      Array.from(el(containerId).children).forEach((c, i) => {
+        c.classList.toggle('selected', Looks.FILTERS[i].id === filterId);
+      });
+    });
+  }
+
+  function broadcastSettings() {
+    PeerLink.send({ type: MSG.SETTINGS, backdropId, filterId });
+  }
+
+  function loadBackdropImage() {
+    return Looks.loadBackdrop(backdropId).then((img) => {
+      backdropImg = img;
+      return img;
+    });
+  }
+
   // ---- Peer events ----
   PeerLink.on('room-ready', ({ code }) => {
     currentRoomCode = code;
     el('room-code-display').textContent = code;
   });
 
-  PeerLink.on('connected', () => {
+  PeerLink.on('connected', async () => {
     PeerLink.send({ type: MSG.HELLO, role: Session.getRole() });
+    buildPickers();
     showScreen('connected-ready');
+
+    const status = el('setup-status');
+    try {
+      await ensureCamera();
+      await loadBackdropImage();
+      status.textContent = 'Loading the cut-out engine…';
+      await ensureSegmenter();
+      Looks.preloadAll();
+      status.textContent = 'Ready when you are.';
+      el('btn-start-session').disabled = false;
+      // Role A is the one whose picks win on first sync.
+      if (Session.getRole() === 'A') broadcastSettings();
+    } catch (e) {
+      showError('Setup failed', e.message || 'Could not start the camera or the cut-out engine.');
+    }
   });
 
   PeerLink.on('connection-error', (err) => {
@@ -106,17 +198,24 @@
   });
 
   PeerLink.on('partner-left', () => {
-    if (screens['strip-review'].classList.contains('active')) return; // session already finished, no need to alarm
+    if (screens['strip-review'].classList.contains('active')) return;
     showError('Your partner disconnected', 'Ask them to reconnect with a fresh room code to try again.');
   });
 
   PeerLink.on('message', (msg) => {
     switch (msg.type) {
+      case MSG.SETTINGS:
+        backdropId = msg.backdropId;
+        filterId = msg.filterId;
+        refreshPickers();
+        loadBackdropImage();
+        if (screens['strip-review'].classList.contains('active')) finishStrip();
+        break;
       case MSG.START_SESSION:
         beginSession();
         break;
-      case MSG.BASE_PHOTO:
-        handleBasePhoto(msg);
+      case MSG.BASE_CUTOUT:
+        handleBaseCutout(msg);
         break;
       case MSG.COMPOSITE_RESULT:
         handleCompositeResult(msg);
@@ -145,18 +244,45 @@
     renderRound();
   }
 
-  // ---- Round capture ----
+  // ---- Live composited preview ----
   const roundIndicator = el('round-indicator');
   const roleBadge = el('role-badge');
-  const ghostOverlay = el('ghost-overlay');
-  const overlayControls = el('overlay-controls');
-  const opacitySlider = el('opacity-slider');
   const statusText = el('round-status-text');
   const captureBtn = el('btn-capture');
   const thumbnailStrip = el('thumbnail-strip');
 
-  let baseCaptured = false; // has the base partner captured+sent this round?
-  let ghostReceivedFor = -1; // roundIndex the ghost currently shown belongs to
+  let previewRaf = null;
+  let partnerCutout = null; // decoded <img> of the base partner's cut-out this round
+  let baseCaptured = false;
+  let cutoutReceivedFor = -1;
+
+  function startPreviewLoop() {
+    if (previewRaf) return;
+    const tick = async () => {
+      previewRaf = requestAnimationFrame(tick);
+      if (!liveVideo.videoWidth) return;
+      await Segmenter.update(liveVideo);
+      const mine = Segmenter.cutout({
+        width: Compositor.FRAME_W,
+        height: Compositor.FRAME_H,
+        mirror: true,
+      });
+      if (!mine) return;
+      const role = Session.getRole();
+      Compositor.compose(stageCtx, {
+        backdrop: backdropImg,
+        cutoutA: role === 'A' ? mine : partnerCutout,
+        cutoutB: role === 'B' ? mine : partnerCutout,
+        filterId,
+      });
+    };
+    previewRaf = requestAnimationFrame(tick);
+  }
+
+  function stopPreviewLoop() {
+    if (previewRaf) cancelAnimationFrame(previewRaf);
+    previewRaf = null;
+  }
 
   function renderRound() {
     liveVideo.srcObject = cameraStream;
@@ -165,17 +291,14 @@
     const idx = Session.getRoundIndex();
     roundIndicator.textContent = 'Photo ' + (idx + 1) + ' of ' + Session.ROUND_COUNT;
 
-    ghostOverlay.hidden = true;
-    ghostOverlay.src = '';
-    overlayControls.hidden = true;
+    partnerCutout = null;
     baseCaptured = false;
-    ghostReceivedFor = -1;
-
+    cutoutReceivedFor = -1;
     renderThumbnails();
 
     if (Session.isBaseThisRound()) {
       roleBadge.textContent = 'Pose first';
-      statusText.textContent = 'Strike a pose, then hit capture!';
+      statusText.textContent = 'Strike a pose — your partner will match it.';
       captureBtn.disabled = false;
     } else {
       roleBadge.textContent = 'Match your partner';
@@ -184,6 +307,7 @@
     }
 
     showScreen('round-capture');
+    startPreviewLoop();
   }
 
   function renderThumbnails() {
@@ -192,52 +316,81 @@
       if (!p) return;
       const img = document.createElement('img');
       img.src = p;
+      img.style.filter = Looks.cssFor(filterId);
       thumbnailStrip.appendChild(img);
     });
   }
 
-  function handleBasePhoto(msg) {
+  function handleBaseCutout(msg) {
     if (msg.roundIndex !== Session.getRoundIndex()) return;
-    if (Session.isOverlayThisRound()) {
-      ghostOverlay.src = msg.imageData;
-      ghostOverlay.hidden = false;
-      overlayControls.hidden = false;
-      ghostReceivedFor = msg.roundIndex;
-      statusText.textContent = 'Align yourself, then hit capture!';
+    if (!Session.isOverlayThisRound()) return;
+    const img = new Image();
+    img.onload = () => {
+      partnerCutout = img;
+      cutoutReceivedFor = msg.roundIndex;
+      statusText.textContent = 'They\'re in frame — pose alongside them, then capture!';
       captureBtn.disabled = false;
-    }
+    };
+    img.src = msg.imageData;
   }
 
   function handleCompositeResult(msg) {
     if (msg.roundIndex !== Session.getRoundIndex()) return;
-    if (Session.isBaseThisRound()) {
-      Session.storePhoto(msg.roundIndex, msg.imageData);
-      goToTransition(msg.roundIndex, msg.imageData);
-    }
+    if (!Session.isBaseThisRound()) return;
+    Session.storePhoto(msg.roundIndex, msg.imageData);
+    goToTransition(msg.roundIndex, msg.imageData);
   }
 
-  captureBtn.addEventListener('click', () => {
+  captureBtn.addEventListener('click', async () => {
     const idx = Session.getRoundIndex();
+    await Segmenter.update(liveVideo);
+    const mine = Segmenter.cutout({
+      width: Compositor.FRAME_W,
+      height: Compositor.FRAME_H,
+      mirror: true,
+    });
+    if (!mine) {
+      statusText.textContent = 'Still finding you — hold still a moment and try again.';
+      return;
+    }
+
     if (Session.isBaseThisRound()) {
       if (baseCaptured) return;
       baseCaptured = true;
-      const dataUrl = Camera.captureDataUrl(liveVideo);
-      PeerLink.send({ type: MSG.BASE_PHOTO, roundIndex: idx, imageData: dataUrl });
       captureBtn.disabled = true;
-      statusText.textContent = "Sent! Waiting for your partner to match your pose…";
+      // Send only the cut-out: the partner never receives our actual room.
+      PeerLink.send({
+        type: MSG.BASE_CUTOUT,
+        roundIndex: idx,
+        imageData: mine.toDataURL('image/png'),
+      });
+      statusText.textContent = 'Sent! Waiting for your partner to join the frame…';
     } else {
-      if (ghostReceivedFor !== idx) return;
-      const composite = Camera.composite(liveVideo, ghostOverlay, parseFloat(opacitySlider.value));
-      Session.storePhoto(idx, composite);
+      if (cutoutReceivedFor !== idx) return;
       captureBtn.disabled = true;
-      PeerLink.send({ type: MSG.COMPOSITE_RESULT, roundIndex: idx, imageData: composite });
-      goToTransition(idx, composite);
+      const role = Session.getRole();
+      // Bake unfiltered so the filter stays changeable on the review screen.
+      const composed = Compositor.composeToCanvas({
+        backdrop: backdropImg,
+        cutoutA: role === 'A' ? mine : partnerCutout,
+        cutoutB: role === 'B' ? mine : partnerCutout,
+        filterId: null,
+      });
+      const dataUrl = composed.toDataURL('image/jpeg', 0.9);
+      Session.storePhoto(idx, dataUrl);
+      PeerLink.send({ type: MSG.COMPOSITE_RESULT, roundIndex: idx, imageData: dataUrl });
+      goToTransition(idx, dataUrl);
     }
   });
 
   function goToTransition(idx, imageData) {
-    el('transition-thumb').src = imageData;
-    el('transition-text').textContent = Session.isLastRound() ? 'Last one! Building your strip…' : 'Nice! Get ready for the next photo…';
+    stopPreviewLoop();
+    const thumb = el('transition-thumb');
+    thumb.src = imageData;
+    thumb.style.filter = Looks.cssFor(filterId);
+    el('transition-text').textContent = Session.isLastRound()
+      ? 'Last one! Building your strip…'
+      : 'Nice! Get ready for the next photo…';
     showScreen('round-transition');
 
     setTimeout(() => {
@@ -247,12 +400,12 @@
         Session.nextRound();
         renderRound();
       }
-    }, 1500);
+    }, 1600);
   }
 
   // ---- Strip review ----
   async function finishStrip() {
-    const canvas = await Strip.buildStrip(Session.getPhotos());
+    const canvas = await Strip.buildStrip(Session.getPhotos(), filterId);
     const displayCanvas = el('strip-canvas');
     displayCanvas.width = canvas.width;
     displayCanvas.height = canvas.height;
@@ -267,6 +420,7 @@
   });
 
   el('btn-start-over').addEventListener('click', () => {
+    stopPreviewLoop();
     PeerLink.teardown();
     Session.reset();
     sessionStarted = false;

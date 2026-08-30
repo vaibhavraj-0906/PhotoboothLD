@@ -242,24 +242,68 @@ body {
   background: #000;
   border: 1px solid var(--glass-border);
 }
+/* The raw feed is only a source for segmentation — the composite is what's shown. */
 #live-video {
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-  transform: scaleX(-1);
-}
-.ghost {
   position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-  opacity: 0.5;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
   pointer-events: none;
 }
+#stage-canvas {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
 
-.overlay-controls { display: flex; align-items: center; gap: 8px; font-size: 0.85rem; color: var(--ice-dim); }
-.overlay-controls input { flex: 1; accent-color: var(--accent); }
+/* ---- Scene pickers ---- */
+.picker { display: flex; flex-direction: column; gap: 8px; text-align: left; }
+.picker-label {
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 1.4px;
+  color: var(--ice-dim);
+}
+
+.swatch-row { display: flex; gap: 8px; flex-wrap: wrap; }
+.swatch {
+  width: 46px;
+  height: 46px;
+  border-radius: 10px;
+  background-size: cover;
+  background-position: center;
+  border: 2px solid transparent;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.12);
+  cursor: pointer;
+  padding: 0;
+  transition: transform 0.12s ease, border-color 0.15s ease;
+}
+.swatch:hover { transform: translateY(-2px); }
+.swatch.selected {
+  border-color: var(--accent);
+  box-shadow: 0 0 14px var(--accent-soft);
+}
+
+.chip-row { display: flex; gap: 6px; flex-wrap: wrap; }
+.chip {
+  padding: 6px 12px;
+  border-radius: 999px;
+  font-size: 0.78rem;
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--ice-dim);
+  border: 1px solid var(--glass-border);
+  cursor: pointer;
+  font-family: inherit;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+.chip:hover { background: rgba(255, 255, 255, 0.1); color: var(--ice); }
+.chip.selected {
+  background: linear-gradient(135deg, var(--aurora-teal), var(--aurora-violet));
+  color: #06121a;
+  font-weight: 600;
+  border-color: transparent;
+}
 
 .status-text { font-size: 0.9rem; color: var(--ice-dim); min-height: 1.2em; }
 
